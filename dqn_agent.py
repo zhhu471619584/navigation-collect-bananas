@@ -15,7 +15,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Agent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, seed, buffer_size, batch_size, lr, tau):
+    def __init__(self, state_size, action_size, seed, buffer_size, batch_size, lr, tau,sequential_sampling_fre):
         """Initialize an Agent object.
         
         Params
@@ -30,6 +30,7 @@ class Agent():
         self.batch_size = batch_size
         self.buffer_size = buffer_size
         self.tau = tau
+        
 
         # Q-Network
         self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
@@ -37,7 +38,7 @@ class Agent():
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr)
 
         # Replay memory
-        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed)
+        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed,sequential_sampling_fre)
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
     
@@ -108,7 +109,7 @@ class Agent():
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed):
+    def __init__(self, action_size, buffer_size, batch_size, seed,sequential_sampling_fre):
         """Initialize a ReplayBuffer object.
 
         Params
@@ -124,6 +125,7 @@ class ReplayBuffer:
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.seed = random.seed(seed)
         self.step = 0
+        self.sequential_sampling_fre = sequential_sampling_fre
     
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
@@ -133,7 +135,7 @@ class ReplayBuffer:
     
     def sample(self):
         """Randomly sample a batch of experiences from memory."""
-        self.step = (self.step + 1) % 16
+        self.step = (self.step + 1) % self.sequential_sampling_fre
         
         if self.step == 0:
             experiences = np.arange(len(self.memory))[-self.batch_size:-1]
