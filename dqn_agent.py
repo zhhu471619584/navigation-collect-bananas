@@ -1,7 +1,6 @@
 import numpy as np
 import random
 from collections import namedtuple, deque
-
 from model import QNetwork
 
 import torch
@@ -23,6 +22,12 @@ class Agent():
             state_size (int): dimension of each state
             action_size (int): dimension of each action
             seed (int): random seed
+            buffer_size(int):replay buffer size
+            batch_size(int): minibatch size
+            lr(float):learning rate 
+            tau(float):for soft update of target parameters
+            sequential_sampling_fre(int):Ratio of random sampling to sequential sampling
+            
         """
         self.state_size = state_size
         self.action_size = action_size
@@ -38,9 +43,8 @@ class Agent():
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr)
 
         # Replay memory
-        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed,sequential_sampling_fre)
-        # Initialize time step (for updating every UPDATE_EVERY steps)
-        self.t_step = 0
+        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed, sequential_sampling_fre)
+
     
     def act(self, state, eps=0.):
         """Returns actions for given state as per current policy.
@@ -109,7 +113,7 @@ class Agent():
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed,sequential_sampling_fre):
+    def __init__(self, action_size, buffer_size, batch_size, seed, sequential_sampling_fre):
         """Initialize a ReplayBuffer object.
 
         Params
@@ -118,6 +122,7 @@ class ReplayBuffer:
             buffer_size (int): maximum size of buffer
             batch_size (int): size of each training batch
             seed (int): random seed
+            sequential_sampling_fre(int):Ratio of random sampling to sequential sampling
         """
         self.action_size = action_size
         self.memory = deque(maxlen=buffer_size)
@@ -134,7 +139,7 @@ class ReplayBuffer:
         
     
     def sample(self):
-        """Randomly sample a batch of experiences from memory."""
+        """Random sampling or sequential sampling a batch of experiences from memory."""
         self.step = (self.step + 1) % self.sequential_sampling_fre
         
         if self.step == 0:
