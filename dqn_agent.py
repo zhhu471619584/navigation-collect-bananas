@@ -2,10 +2,11 @@ import numpy as np
 import random
 from collections import namedtuple, deque
 from model import QNetwork
-
+from torch.autograd import Variable
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from prioritized_memory import Memory
 
 
 
@@ -35,7 +36,8 @@ class Agent():
         self.batch_size = batch_size
         self.buffer_size = buffer_size
         self.tau = tau
-        
+        self.step = 0
+        self.sequential_sampling_fre = sequential_sampling_fre
 
         # Q-Network
         self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
@@ -43,8 +45,7 @@ class Agent():
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr)
 
         # Replay memory
-        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed, sequential_sampling_fre)
-
+        self.memory = Memory(self.buffer_size)
     
     def act(self, state, eps=0.):
         """Returns actions for given state as per current policy.
@@ -66,7 +67,7 @@ class Agent():
         else:
             return random.choice(np.arange(self.action_size))
 
-    def learn(self, experiences, gamma):
+    def learn(self,gamma):
         """Update value parameters using given batch of experience tuples.
 
         Params
@@ -74,29 +75,35 @@ class Agent():
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
-        states, actions, rewards, next_states, dones = experiences
+        states, actions, rewards, next_states, dones, idxs, is_weights = self.sample()
         
         # Get max predicted Q values (for next states) from target model
-        Q_local_argmax = self.qnetwork_local(next_states).max(1)[1].unsqueeze(1)
-        Q_targets_next_states = self.qnetwork_target(next_states).detach().gather(1, Q_local_argmax)
         
-        # Compute Q targets for current states 
-        Q_targets = rewards + (gamma * Q_targets_next_states * (1 - dones))
-
+        with torch.no_grad():
+            Q_local_argmax = self.qnetwork_local(next_states).max(1)[1].unsqueeze(1)
+            Q_targets_next_states = self.qnetwork_target(next_states).detach().gather(1, Q_local_argmax)
+            # Compute Q targets for current states 
+            Q_targets = rewards + (gamma * Q_targets_next_states * (1 - dones))
+        
         # Get expected Q values from local model
         Q_expected = self.qnetwork_local(states).gather(1, actions)
-
+        errors = torch.abs(Q_expected-Q_targets).cpu().data.numpy().squeeze()
+        # update priority
+        for i in range(self.batch_size):
+            idx = idxs[i]
+            self.memory.update(idx, errors[i])
+        
         # Compute loss
-        loss = F.mse_loss(Q_expected, Q_targets)
-        # Minimize the loss
         self.optimizer.zero_grad()
+        loss = (torch.FloatTensor(is_weights).to(device) * F.mse_loss(Q_expected, Q_targets)).mean()
+        
         loss.backward()
         self.optimizer.step()
 
         # ------------------- update target network ------------------- #
-        self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)                     
+        self.soft_update()                     
 
-    def soft_update(self, local_model, target_model, tau):
+    def soft_update(self):
         """Soft update model parameters.
         θ_target = τ*θ_local + (1 - τ)*θ_target
 
@@ -106,56 +113,41 @@ class Agent():
             target_model (PyTorch model): weights will be copied to
             tau (float): interpolation parameter 
         """
-        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
-            target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
+        for target_param, local_param in zip(self.qnetwork_target.parameters(), self.qnetwork_local.parameters()):
+            target_param.data.copy_(self.tau*local_param.data + (1.0-self.tau)*target_param.data)
 
 
-class ReplayBuffer:
-    """Fixed-size buffer to store experience tuples."""
+    def append_sample(self, state, action, reward, next_state, done, gamma):
+        with torch.no_grad():
+            target = self.qnetwork_local(Variable(torch.FloatTensor(state).unsqueeze(0).to(device))).data
+            old_val = target[0][action]
+            target_val = self.qnetwork_target(Variable(torch.FloatTensor(next_state).unsqueeze(0).to(device))).data
+            if done:
+                target[0][action] = reward
+            else:
+                target[0][action] = reward + gamma * torch.max(target_val)
 
-    def __init__(self, action_size, buffer_size, batch_size, seed, sequential_sampling_fre):
-        """Initialize a ReplayBuffer object.
+            error = abs(old_val - target[0][action])
 
-        Params
-        ======
-            action_size (int): dimension of each action
-            buffer_size (int): maximum size of buffer
-            batch_size (int): size of each training batch
-            seed (int): random seed
-            sequential_sampling_fre(int):Ratio of random sampling to sequential sampling
-        """
-        self.action_size = action_size
-        self.memory = deque(maxlen=buffer_size)
-        self.batch_size = batch_size
-        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-        self.seed = random.seed(seed)
-        self.step = 0
-        self.sequential_sampling_fre = sequential_sampling_fre
-    
-    def add(self, state, action, reward, next_state, done):
-        """Add a new experience to memory."""
-        e = self.experience(state, action, reward, next_state, done)
-        self.memory.append(e)
-        
-    
+            self.memory.add(error, (state, action, reward, next_state, done))
+            
     def sample(self):
         """Random sampling or sequential sampling a batch of experiences from memory."""
         self.step = (self.step + 1) % self.sequential_sampling_fre
-        
         if self.step == 0:
-            experiences = np.arange(len(self.memory))[-self.batch_size:-1]
+            mini_batch, idxs, is_weights = self.memory.sequential_sample(self.batch_size)
         else:
-            experiences = np.random.choice(np.arange(len(self.memory)), size=self.batch_size,replace=False)
+            mini_batch, idxs, is_weights = self.memory.sample(self.batch_size)
             
-            
-        states = torch.from_numpy(np.vstack([self.memory[i].state for i in experiences if i is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([self.memory[i].action for i in experiences if i is not None])).long().to(device)
-        rewards = torch.from_numpy(np.vstack([self.memory[i].reward for i in experiences if i is not None])).float().to(device)
-        next_states = torch.from_numpy(np.vstack([self.memory[i].next_state for i in experiences if i is not None])).float().to(device)
-        dones = torch.from_numpy(np.vstack([self.memory[i].done for i in experiences if i is not None]).astype(np.uint8)).float().to(device)
+        mini_batch = np.array(mini_batch).transpose()
+        states = torch.Tensor(np.vstack(mini_batch[0])).float().to(device)
+        actions = torch.Tensor(np.vstack(mini_batch[1])).long().to(device)
+        rewards = torch.FloatTensor(np.vstack(mini_batch[2])).to(device)
+        next_states = torch.Tensor(np.vstack(mini_batch[3])).float().to(device)
+        dones = torch.FloatTensor(np.vstack(mini_batch[4].astype(np.uint8))).to(device)
   
-        return (states, actions, rewards, next_states, dones)
-
-    def __len__(self):
-        """Return the current size of internal memory."""
-        return len(self.memory)
+        return (states, actions, rewards, next_states, dones, idxs, is_weights)
+       
+    
+            
+     
